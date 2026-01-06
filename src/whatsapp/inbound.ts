@@ -50,22 +50,24 @@ export class InboundHandler {
   }
 
   private async fetchWebhookUrl(): Promise<void> {
-    // Check if webhook URL is set via environment variable (fallback for localhost CRM)
-    const envWebhookUrl = process.env.INBOUND_WEBHOOK_URL || process.env.N8N_WEBHOOK_INBOUND_URL || process.env.CRM_WEBHOOK_URL;
+    // Check if webhook URL is set via environment variable (highest priority - works without CRM)
+    const envWebhookUrl = process.env.INBOUND_WEBHOOK_URL 
+      || process.env.N8N_WEBHOOK_INBOUND_URL 
+      || process.env.CRM_WEBHOOK_URL
+      || process.env.N8N_WEBHOOK_URL;
     
-    // If we have an env variable and no webhook URL is set, use it immediately
-    if (envWebhookUrl && !this.webhookUrl) {
-      this.webhookUrl = envWebhookUrl;
-      logger.info({ webhookUrl: envWebhookUrl, source: 'environment variable' }, 'Using webhook URL from environment variable (CRM not accessible)');
-      return;
+    // If we have an env variable, use it immediately and skip CRM fetch entirely
+    if (envWebhookUrl) {
+      if (this.webhookUrl !== envWebhookUrl) {
+        this.webhookUrl = envWebhookUrl;
+        logger.info({ webhookUrl: envWebhookUrl, source: 'environment variable' }, 'Using webhook URL from environment variable (skipping CRM fetch)');
+      } else {
+        logger.debug('Webhook URL already set from environment variable, skipping CRM fetch');
+      }
+      return; // Skip CRM fetch when env variable is set
     }
     
-    // If we already have a webhook URL from env, skip CRM fetch (unless forced refresh)
-    if (envWebhookUrl && this.webhookUrl === envWebhookUrl) {
-      logger.debug('Webhook URL already set from environment variable, skipping CRM fetch');
-      return;
-    }
-
+    // Only try to fetch from CRM if no environment variable is set
     try {
       const crmUrl = process.env.CRM_URL || 'http://localhost:3000';
       const crmApiKey = process.env.CRM_API_KEY || '';
@@ -104,11 +106,7 @@ export class InboundHandler {
           }
         } else {
           logger.warn({ settings: data.settings }, 'Webhook URL not found in CRM settings');
-          // If CRM doesn't have webhook URL but we have env fallback, use it
-          if (envWebhookUrl) {
-            this.webhookUrl = envWebhookUrl;
-            logger.info({ webhookUrl: envWebhookUrl }, 'Using webhook URL from environment variable (CRM settings empty)');
-          } else if (this.webhookUrl) {
+          if (this.webhookUrl) {
             logger.info('Clearing cached webhook URL');
             this.webhookUrl = null;
           }
@@ -122,10 +120,10 @@ export class InboundHandler {
           errorBody: errorText.substring(0, 200) // First 200 chars
         }, 'Failed to fetch webhook URL from CRM');
         
-        // If CRM is not accessible and we have env fallback, use it
-        if (envWebhookUrl && !this.webhookUrl) {
-          this.webhookUrl = envWebhookUrl;
-          logger.info({ webhookUrl: envWebhookUrl }, 'Using webhook URL from environment variable (CRM fetch failed)');
+        // Clear webhook URL if CRM fetch failed and no env variable is set
+        if (this.webhookUrl) {
+          logger.info('Clearing cached webhook URL due to CRM fetch failure');
+          this.webhookUrl = null;
         }
       }
     } catch (error) {
@@ -135,10 +133,10 @@ export class InboundHandler {
         crmUrl: process.env.CRM_URL 
       }, 'Error fetching webhook URL from CRM');
       
-      // If CRM is not accessible and we have env fallback, use it
-      if (envWebhookUrl && !this.webhookUrl) {
-        this.webhookUrl = envWebhookUrl;
-        logger.info({ webhookUrl: envWebhookUrl }, 'Using webhook URL from environment variable (CRM connection failed)');
+      // Clear webhook URL if CRM connection failed and no env variable is set
+      if (this.webhookUrl) {
+        logger.info('Clearing cached webhook URL due to CRM connection failure');
+        this.webhookUrl = null;
       }
     }
   }

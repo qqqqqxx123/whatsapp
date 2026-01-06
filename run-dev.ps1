@@ -5,3 +5,4 @@ $env:NODE_ENV = "development"
 npx tsx watch src/index.ts
 
 
+
