@@ -10,6 +10,7 @@ import { Boom } from '@hapi/boom';
 import { logger } from '../utils/logger';
 import { MessageQueue } from './queue';
 import { InboundHandler } from './inbound';
+import { OutboundHandler } from './outbound';
 import { join } from 'path';
 import { existsSync, mkdirSync } from 'fs';
 import { readdir, unlink } from 'fs/promises';
@@ -28,11 +29,13 @@ export class WhatsAppClient {
   private isConnected: boolean = false;
   private messageQueue: MessageQueue;
   private inboundHandler: InboundHandler;
+  private outboundHandler: OutboundHandler;
   private authStatePath: string;
 
   constructor() {
     this.messageQueue = new MessageQueue();
     this.inboundHandler = new InboundHandler();
+    this.outboundHandler = new OutboundHandler();
     const sessionDir = process.env.SESSION_DIR || './sessions';
     this.authStatePath = join(sessionDir, 'baileys-auth');
     
@@ -115,18 +118,22 @@ export class WhatsAppClient {
       }
     });
 
-    // Handle incoming messages
+    // Handle incoming and outgoing messages
     this.sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
 
       for (const message of messages) {
-        // Skip if message is from us
-        if (message.key.fromMe) continue;
-
         try {
-          await this.inboundHandler.handleBaileysMessage(message);
+          if (message.key.fromMe) {
+            // Outbound message (sent from mobile device)
+            await this.outboundHandler.handleBaileysMessage(message);
+          } else {
+            // Inbound message (received on mobile device)
+            await this.inboundHandler.handleBaileysMessage(message);
+          }
         } catch (error) {
-          logger.error({ error, messageId: message.key.id }, 'Failed to handle inbound message');
+          const direction = message.key.fromMe ? 'outbound' : 'inbound';
+          logger.error({ error, messageId: message.key.id, direction }, `Failed to handle ${direction} message`);
         }
       }
     });
@@ -287,6 +294,9 @@ export class WhatsAppClient {
 
   // Refresh webhook URL from CRM settings
   async refreshCRMWebhookUrl(): Promise<void> {
-    await this.inboundHandler.refreshWebhookUrl();
+    await Promise.all([
+      this.inboundHandler.refreshWebhookUrl(),
+      this.outboundHandler.refreshWebhookUrl(),
+    ]);
   }
 }
