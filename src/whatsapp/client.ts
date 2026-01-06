@@ -284,4 +284,9 @@ export class WhatsAppClient {
   setCRMWebhookUrl(url: string): void {
     this.inboundHandler.setWebhookUrl(url);
   }
+
+  // Refresh webhook URL from CRM settings
+  async refreshCRMWebhookUrl(): Promise<void> {
+    await this.inboundHandler.refreshWebhookUrl();
+  }
 }

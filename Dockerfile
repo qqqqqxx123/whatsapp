@@ -65,3 +65,4 @@ EXPOSE 3001
 # Run the application
 CMD ["node", "dist/index.js"]
 
+

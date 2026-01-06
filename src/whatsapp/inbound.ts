@@ -5,7 +5,9 @@ import { DedupeCache } from './dedupe';
 
 export class InboundHandler {
   private webhookUrl: string | null = null;
+  private webhookUrlLastFetched: number = 0;
   private dedupeCache: DedupeCache;
+  private readonly WEBHOOK_REFRESH_INTERVAL_MS = 5 * 60 * 1000; // Refresh every 5 minutes
 
   constructor() {
     this.dedupeCache = new DedupeCache();
@@ -18,6 +20,12 @@ export class InboundHandler {
 
   getWebhookUrl(): string | null {
     return this.webhookUrl;
+  }
+
+  async refreshWebhookUrl(): Promise<void> {
+    this.webhookUrlLastFetched = 0; // Force refresh
+    await this.fetchWebhookUrl();
+    this.webhookUrlLastFetched = Date.now();
   }
 
   private async fetchWebhookUrl(): Promise<void> {
@@ -34,10 +42,20 @@ export class InboundHandler {
         const webhookUrl = data.settings?.n8n_webhook_inbound_url;
 
         if (webhookUrl) {
+          const previousUrl = this.webhookUrl;
           this.webhookUrl = webhookUrl;
-          logger.info({ webhookUrl }, 'Fetched webhook URL from CRM');
+          if (previousUrl !== webhookUrl) {
+            logger.info({ webhookUrl, previousUrl }, 'Webhook URL updated from CRM');
+          } else {
+            logger.debug({ webhookUrl }, 'Fetched webhook URL from CRM (unchanged)');
+          }
         } else {
           logger.warn('Webhook URL not found in CRM settings');
+          // Clear cached URL if it was removed from settings
+          if (this.webhookUrl) {
+            logger.info('Clearing cached webhook URL');
+            this.webhookUrl = null;
+          }
         }
       } else {
         logger.warn({ status: response.status }, 'Failed to fetch webhook URL from CRM');
@@ -91,9 +109,11 @@ export class InboundHandler {
 
       logger.info({ messageId, from: phoneE164 }, 'Processing inbound message');
 
-      // Fetch webhook URL from CRM if not set
-      if (!this.webhookUrl) {
+      // Always fetch latest webhook URL from CRM (refresh every 5 minutes or if not set)
+      const now = Date.now();
+      if (!this.webhookUrl || (now - this.webhookUrlLastFetched) > this.WEBHOOK_REFRESH_INTERVAL_MS) {
         await this.fetchWebhookUrl();
+        this.webhookUrlLastFetched = now;
       }
 
       // Forward to CRM webhook if configured

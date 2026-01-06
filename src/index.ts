@@ -59,6 +59,17 @@ app.post('/disconnect', apiKeyAuth, async (req, res) => {
   }
 });
 
+// Refresh webhook URL from CRM
+app.post('/refresh-webhook', apiKeyAuth, async (req, res) => {
+  try {
+    await whatsappClient.refreshCRMWebhookUrl();
+    res.json({ success: true, message: 'Webhook URL refreshed' });
+  } catch (error) {
+    logger.error({ error }, 'Failed to refresh webhook URL');
+    res.status(500).json({ error: 'Failed to refresh webhook URL' });
+  }
+});
+
 // Send message
 app.post('/send', apiKeyAuth, rateLimiter, async (req, res) => {
   try {
