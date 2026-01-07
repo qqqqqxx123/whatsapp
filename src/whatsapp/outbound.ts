@@ -12,7 +12,28 @@ export class OutboundHandler {
   private dedupeCache: DedupeCache;
 
   constructor() {
-    this.dedupeCache = new DedupeCache(1000); // Cache last 1000 message IDs
+    this.dedupeCache = new DedupeCache(); // Cache size configured via DEDUPE_CACHE_SIZE env var
+    // Initialize webhook URL from environment variable if CRM_URL is not accessible
+    // Check multiple possible env variable names
+    const envWebhookUrl = process.env.OUTBOUND_WEBHOOK_URL 
+      || process.env.N8N_WEBHOOK_OUTBOUND_URL 
+      || process.env.N8N_WEBHOOK_URL
+      || process.env.CRM_WEBHOOK_URL;
+    
+    logger.debug({ 
+      OUTBOUND_WEBHOOK_URL: process.env.OUTBOUND_WEBHOOK_URL ? 'set' : 'not set',
+      N8N_WEBHOOK_OUTBOUND_URL: process.env.N8N_WEBHOOK_OUTBOUND_URL ? 'set' : 'not set',
+      N8N_WEBHOOK_URL: process.env.N8N_WEBHOOK_URL ? 'set' : 'not set',
+      CRM_WEBHOOK_URL: process.env.CRM_WEBHOOK_URL ? 'set' : 'not set',
+      found: envWebhookUrl ? 'yes' : 'no'
+    }, 'Checking environment variables for outbound webhook URL');
+    
+    if (envWebhookUrl) {
+      this.webhookUrl = envWebhookUrl;
+      logger.info({ webhookUrl: envWebhookUrl, source: 'environment variable' }, 'Outbound webhook URL initialized from environment variable');
+    } else {
+      logger.warn('No outbound webhook URL found in environment variables (checked: OUTBOUND_WEBHOOK_URL, N8N_WEBHOOK_OUTBOUND_URL, N8N_WEBHOOK_URL, CRM_WEBHOOK_URL). Will try to fetch from CRM.');
+    }
   }
 
   getWebhookUrl(): string | null {
@@ -25,6 +46,24 @@ export class OutboundHandler {
   }
 
   private async fetchWebhookUrl(): Promise<void> {
+    // Check if webhook URL is set via environment variable (highest priority - works without CRM)
+    const envWebhookUrl = process.env.OUTBOUND_WEBHOOK_URL 
+      || process.env.N8N_WEBHOOK_OUTBOUND_URL 
+      || process.env.N8N_WEBHOOK_URL
+      || process.env.CRM_WEBHOOK_URL;
+    
+    // If we have an env variable, use it immediately and skip CRM fetch entirely
+    if (envWebhookUrl) {
+      if (this.webhookUrl !== envWebhookUrl) {
+        this.webhookUrl = envWebhookUrl;
+        logger.info({ webhookUrl: envWebhookUrl, source: 'environment variable' }, 'Using outbound webhook URL from environment variable (skipping CRM fetch)');
+      } else {
+        logger.debug('Outbound webhook URL already set from environment variable, skipping CRM fetch');
+      }
+      return; // Skip CRM fetch when env variable is set
+    }
+    
+    // Only try to fetch from CRM if no environment variable is set
     try {
       const response = await fetch(`${this.CRM_URL}/api/settings`, {
         method: 'GET',
@@ -57,9 +96,19 @@ export class OutboundHandler {
         }
       } else {
         logger.warn({ status: response.status }, 'Failed to fetch outbound webhook URL from CRM');
+        // Clear webhook URL if CRM fetch failed and no env variable is set
+        if (this.webhookUrl) {
+          logger.info('Clearing cached outbound webhook URL due to CRM fetch failure');
+          this.webhookUrl = null;
+        }
       }
     } catch (error) {
       logger.error({ error }, 'Error fetching outbound webhook URL from CRM');
+      // Clear webhook URL if CRM connection failed and no env variable is set
+      if (this.webhookUrl) {
+        logger.info('Clearing cached outbound webhook URL due to CRM connection failure');
+        this.webhookUrl = null;
+      }
     }
   }
 
@@ -101,11 +150,25 @@ export class OutboundHandler {
 
       logger.info({ messageId, to: phoneE164 }, 'Processing outbound message from mobile device');
 
-      // Always fetch latest webhook URL from CRM (refresh every 5 minutes or if not set)
-      const now = Date.now();
-      if (!this.webhookUrl || (now - this.webhookUrlLastFetched) > this.WEBHOOK_REFRESH_INTERVAL_MS) {
-        await this.fetchWebhookUrl();
-        this.webhookUrlLastFetched = now;
+      // Check environment variable first (highest priority - works without CRM)
+      const envWebhookUrl = process.env.OUTBOUND_WEBHOOK_URL 
+        || process.env.N8N_WEBHOOK_OUTBOUND_URL 
+        || process.env.N8N_WEBHOOK_URL
+        || process.env.CRM_WEBHOOK_URL;
+      
+      if (envWebhookUrl) {
+        // If env variable is set, use it directly (no need to fetch from CRM)
+        if (this.webhookUrl !== envWebhookUrl) {
+          this.webhookUrl = envWebhookUrl;
+          logger.info({ webhookUrl: envWebhookUrl }, 'Using outbound webhook URL from environment variable (direct mode - CRM not required)');
+        }
+      } else {
+        // Only try to fetch from CRM if no environment variable is set
+        const now = Date.now();
+        if (!this.webhookUrl || (now - this.webhookUrlLastFetched) > this.WEBHOOK_REFRESH_INTERVAL_MS) {
+          await this.fetchWebhookUrl();
+          this.webhookUrlLastFetched = now;
+        }
       }
 
       // First, save message to CRM database via API
