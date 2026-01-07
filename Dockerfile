@@ -47,8 +47,8 @@ WORKDIR /app
 COPY package*.json ./
 COPY tsconfig.json ./
 
-# Install dependencies
-RUN npm ci --only=production
+# Install deps INCLUDING devDeps (force it)
+RUN npm ci --include=dev
 
 # Copy source code
 COPY src ./src
@@ -56,14 +56,16 @@ COPY src ./src
 # Build TypeScript
 RUN npm run build
 
-# Create sessions directory
+# Remove dev deps after build to keep image small
+RUN npm prune --omit=dev
+
+# Create sessions directory (Baileys needs this)
 RUN mkdir -p /app/sessions
 
-# Expose port
+# Expose API port
 EXPOSE 3001
 
-# Run the application
+# Start wa-bridge
 CMD ["node", "dist/index.js"]
-
 
 
