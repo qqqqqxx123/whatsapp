@@ -73,20 +73,22 @@ app.post('/refresh-webhook', apiKeyAuth, async (req, res) => {
 // Send message
 app.post('/send', apiKeyAuth, rateLimiter, async (req, res) => {
   try {
-    const { to, text, template } = req.body;
+    const { to, text, image, caption, template } = req.body;
 
     if (!to) {
       return res.status(400).json({ error: 'Missing required field: to' });
     }
 
-    if (!text && !template) {
-      return res.status(400).json({ error: 'Either text or template is required' });
+    if (!text && !template && !image) {
+      return res.status(400).json({ error: 'Either text, image, or template is required' });
     }
 
     // Start sending (queued)
     const messageId = await whatsappClient.sendMessage({
       to,
       text,
+      image,
+      caption,
       template,
     });
 
@@ -94,6 +96,7 @@ app.post('/send', apiKeyAuth, rateLimiter, async (req, res) => {
       to,
       messageId,
       hasText: !!text,
+      hasImage: !!image,
       hasTemplate: !!template,
     });
 

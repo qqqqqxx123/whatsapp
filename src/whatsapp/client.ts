@@ -18,11 +18,21 @@ import { readdir, unlink } from 'fs/promises';
 export interface SendMessageOptions {
   to: string;
   text?: string;
+  image?: {
+    url: string;
+  };
+  caption?: string;
   template?: {
     name: string;
     language: string;
     variables?: string[];
   };
+}
+
+interface ImageCacheEntry {
+  buffer: Buffer;
+  timestamp: number;
+  size: number;
 }
 
 export class WhatsAppClient {
@@ -35,6 +45,10 @@ export class WhatsAppClient {
   private inboundHandler: InboundHandler;
   private outboundHandler: OutboundHandler;
   private authStatePath: string;
+  private imageCache: Map<string, ImageCacheEntry> = new Map();
+  private readonly maxCacheSize: number; // Maximum total cache size in bytes (default: 100MB)
+  private readonly cacheTTL: number; // Cache TTL in milliseconds (default: 1 hour)
+  private currentCacheSize: number = 0;
 
   constructor() {
     this.messageQueue = new MessageQueue();
@@ -43,12 +57,21 @@ export class WhatsAppClient {
     const sessionDir = process.env.SESSION_DIR || './sessions';
     this.authStatePath = join(sessionDir, 'baileys-auth');
     
+    // Image cache configuration
+    this.maxCacheSize = parseInt(process.env.IMAGE_CACHE_MAX_SIZE_MB || '100', 10) * 1024 * 1024; // Default 100MB
+    this.cacheTTL = parseInt(process.env.IMAGE_CACHE_TTL_MS || '3600000', 10); // Default 1 hour
+    
     // Ensure session directory exists
     if (!existsSync(this.authStatePath)) {
       mkdirSync(this.authStatePath, { recursive: true });
     }
     
     this.initializeClient();
+    
+    // Clean up expired cache entries periodically (every 30 minutes)
+    setInterval(() => {
+      this.cleanExpiredCache();
+    }, 30 * 60 * 1000);
   }
 
   private async initializeClient() {
@@ -228,7 +251,7 @@ export class WhatsAppClient {
       throw new Error('WhatsApp client not initialized');
     }
 
-    const { to, text, template } = options;
+    const { to, text, image, caption, template } = options;
 
     // Normalize phone number from E.164 format (+852...) to Baileys JID format
     // Remove + and any non-digit characters
@@ -250,11 +273,29 @@ export class WhatsAppClient {
 
         // Build message with images and buttons
         result = await this.sendTemplateMessage(jid, templateData, template.variables || []);
+      } else if (image?.url) {
+        // Send image message
+        const imageBuffer = await this.downloadImage(image.url);
+        if (!imageBuffer) {
+          throw new Error('Failed to download image');
+        }
+
+        result = await this.sock.sendMessage(jid, {
+          image: imageBuffer,
+          caption: caption || text || undefined,
+        });
+
+        if (!result) {
+          throw new Error('Failed to send image message');
+        }
       } else if (text) {
         // Simple text message
         result = await this.sock.sendMessage(jid, { text });
+        if (!result) {
+          throw new Error('Failed to send text message');
+        }
       } else {
-        throw new Error('Either text or template is required');
+        throw new Error('Either text, image, or template is required');
       }
 
       // Extract message ID from Baileys response
@@ -447,16 +488,104 @@ export class WhatsAppClient {
 
   private async downloadImage(url: string): Promise<Buffer | null> {
     try {
+      // Check cache first
+      const cached = this.imageCache.get(url);
+      if (cached) {
+        const age = Date.now() - cached.timestamp;
+        if (age < this.cacheTTL) {
+          logger.debug({ url, cacheHit: true, age: `${Math.round(age / 1000)}s` }, 'Image served from cache');
+          return cached.buffer;
+        } else {
+          // Cache expired, remove it
+          this.imageCache.delete(url);
+          this.currentCacheSize -= cached.size;
+          logger.debug({ url }, 'Cache entry expired, removed');
+        }
+      }
+
+      // Download image
+      logger.debug({ url }, 'Downloading image (cache miss)');
       const response = await fetch(url);
       if (!response.ok) {
         logger.warn({ url, status: response.status }, 'Failed to download image');
         return null;
       }
       const arrayBuffer = await response.arrayBuffer();
-      return Buffer.from(arrayBuffer);
+      const buffer = Buffer.from(arrayBuffer);
+      const size = buffer.length;
+
+      // Check if we have space in cache
+      if (size > this.maxCacheSize) {
+        logger.warn({ url, size, maxCacheSize: this.maxCacheSize }, 'Image too large for cache, not caching');
+        return buffer;
+      }
+
+      // Make room in cache if needed
+      while (this.currentCacheSize + size > this.maxCacheSize && this.imageCache.size > 0) {
+        this.evictOldestCacheEntry();
+      }
+
+      // Add to cache
+      this.imageCache.set(url, {
+        buffer,
+        timestamp: Date.now(),
+        size,
+      });
+      this.currentCacheSize += size;
+
+      logger.debug(
+        { url, size, cacheSize: this.imageCache.size, totalCacheSize: `${Math.round(this.currentCacheSize / 1024 / 1024)}MB` },
+        'Image downloaded and cached'
+      );
+
+      return buffer;
     } catch (error) {
       logger.error({ error, url }, 'Error downloading image');
       return null;
+    }
+  }
+
+  private evictOldestCacheEntry(): void {
+    let oldestUrl: string | null = null;
+    let oldestTimestamp = Infinity;
+
+    for (const [url, entry] of this.imageCache.entries()) {
+      if (entry.timestamp < oldestTimestamp) {
+        oldestTimestamp = entry.timestamp;
+        oldestUrl = url;
+      }
+    }
+
+    if (oldestUrl) {
+      const entry = this.imageCache.get(oldestUrl);
+      if (entry) {
+        this.imageCache.delete(oldestUrl);
+        this.currentCacheSize -= entry.size;
+        logger.debug({ url: oldestUrl, size: entry.size }, 'Evicted oldest cache entry');
+      }
+    }
+  }
+
+  private cleanExpiredCache(): void {
+    const now = Date.now();
+    let cleaned = 0;
+    let cleanedSize = 0;
+
+    for (const [url, entry] of this.imageCache.entries()) {
+      const age = now - entry.timestamp;
+      if (age >= this.cacheTTL) {
+        this.imageCache.delete(url);
+        this.currentCacheSize -= entry.size;
+        cleaned++;
+        cleanedSize += entry.size;
+      }
+    }
+
+    if (cleaned > 0) {
+      logger.info(
+        { cleaned, cleanedSize: `${Math.round(cleanedSize / 1024 / 1024)}MB`, remaining: this.imageCache.size },
+        'Cleaned expired cache entries'
+      );
     }
   }
 
