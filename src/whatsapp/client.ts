@@ -18,7 +18,11 @@ import { readdir, unlink } from 'fs/promises';
 export interface SendMessageOptions {
   to: string;
   text?: string;
-  template?: any;
+  template?: {
+    name: string;
+    language: string;
+    variables?: string[];
+  };
 }
 
 export class WhatsAppClient {
@@ -224,11 +228,7 @@ export class WhatsAppClient {
       throw new Error('WhatsApp client not initialized');
     }
 
-    const { to, text } = options;
-
-    if (!text) {
-      throw new Error('Text is required');
-    }
+    const { to, text, template } = options;
 
     // Normalize phone number from E.164 format (+852...) to Baileys JID format
     // Remove + and any non-digit characters
@@ -239,10 +239,25 @@ export class WhatsAppClient {
     const jid = `${normalizedPhone}@s.whatsapp.net`;
 
     try {
-      const result = await this.sock.sendMessage(jid, { text });
+      let result;
+
+      if (template) {
+        // Fetch template from CRM API
+        const templateData = await this.fetchTemplate(template.name, template.language);
+        if (!templateData) {
+          throw new Error(`Template ${template.name} (${template.language}) not found`);
+        }
+
+        // Build message with images and buttons
+        result = await this.sendTemplateMessage(jid, templateData, template.variables || []);
+      } else if (text) {
+        // Simple text message
+        result = await this.sock.sendMessage(jid, { text });
+      } else {
+        throw new Error('Either text or template is required');
+      }
 
       // Extract message ID from Baileys response
-      // Baileys returns the message key which has id property
       const messageId = result?.key?.id || `${Date.now()}-${Math.random()}`;
 
       return messageId;
@@ -250,6 +265,202 @@ export class WhatsAppClient {
       logger.error({ error, to, jid }, 'Failed to execute send');
       throw error;
     }
+  }
+
+  private async fetchTemplate(name: string, language: string): Promise<any> {
+    const CRM_URL = process.env.CRM_URL || 'http://localhost:3000';
+    const CRM_API_KEY = process.env.CRM_API_KEY || '';
+
+    try {
+      const response = await fetch(
+        `${CRM_URL}/api/whatsapp/templates?name=${encodeURIComponent(name)}&language=${encodeURIComponent(language)}&is_custom=true`,
+        {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(CRM_API_KEY && { 'X-API-Key': CRM_API_KEY }),
+          },
+          signal: AbortSignal.timeout(10000), // 10 second timeout
+        }
+      );
+
+      if (!response.ok) {
+        logger.warn({ name, language, status: response.status }, 'Failed to fetch template from CRM');
+        return null;
+      }
+
+      const data = await response.json();
+      const templates = data.templates || [];
+      
+      // Find exact match
+      const template = templates.find((t: any) => t.name === name && t.language === language);
+      
+      if (!template) {
+        logger.warn({ name, language }, 'Template not found in CRM');
+        return null;
+      }
+
+      return template;
+    } catch (error) {
+      logger.error({ error, name, language }, 'Error fetching template from CRM');
+      return null;
+    }
+  }
+
+  private async sendTemplateMessage(jid: string, template: any, variables: string[]): Promise<proto.WebMessageInfo> {
+    if (!this.sock) {
+      throw new Error('WhatsApp client not initialized');
+    }
+
+    // Sort components: BUTTONS, HEADER, BODY
+    const sortedComponents = (template.components || []).sort((a: any, b: any) => {
+      const order = { BUTTONS: 0, HEADER: 1, BODY: 2 };
+      return (order[a.type as keyof typeof order] || 999) - (order[b.type as keyof typeof order] || 999);
+    });
+
+    // Build message parts
+    const messageParts: any[] = [];
+    let bodyText = '';
+    let headerText = '';
+    const images: string[] = [];
+    const buttons: Array<{ type: 'URL' | 'PHONE_NUMBER'; text: string; url?: string; phone_number?: string }> = [];
+
+    // Process components
+    for (const component of sortedComponents) {
+      if (component.type === 'HEADER') {
+        headerText = this.replaceVariables(component.text || '', variables);
+      } else if (component.type === 'BODY') {
+        bodyText = this.replaceVariables(component.text || '', variables);
+        
+        // Collect images from component.images or image1-image8 columns
+        if (component.format === 'IMAGE') {
+          if (component.images && component.images.length > 0) {
+            images.push(...component.images);
+          } else {
+            // Get from image1-image8 columns
+            for (let i = 1; i <= 8; i++) {
+              const imageField = `image${i}` as keyof typeof template;
+              const imageUrl = template[imageField] as string | undefined;
+              if (imageUrl) {
+                images.push(imageUrl);
+              }
+            }
+          }
+        }
+      } else if (component.type === 'BUTTONS') {
+        // Get buttons from component or button1-button2 columns
+        if (component.buttons && component.buttons.length > 0) {
+          buttons.push(...component.buttons);
+        } else {
+          if (template.button1_text && template.button1_type) {
+            buttons.push({
+              type: template.button1_type,
+              text: template.button1_text,
+              url: template.button1_url,
+              phone_number: template.button1_phone,
+            });
+          }
+          if (template.button2_text && template.button2_type) {
+            buttons.push({
+              type: template.button2_type,
+              text: template.button2_text,
+              url: template.button2_url,
+              phone_number: template.button2_phone,
+            });
+          }
+        }
+      }
+    }
+
+    // Build Baileys message
+    // If we have images, send them first, then text, then buttons
+    if (images.length > 0) {
+      // Send first image with caption (header + body text)
+      const caption = [headerText, bodyText].filter(Boolean).join('\n\n');
+      
+      // Download and send image
+      const imageUrl = images[0];
+      const imageBuffer = await this.downloadImage(imageUrl);
+      
+      if (imageBuffer) {
+        const result = await this.sock.sendMessage(jid, {
+          image: imageBuffer,
+          caption: caption || undefined,
+        });
+        
+        // Send remaining images if any
+        for (let i = 1; i < images.length; i++) {
+          const imgBuffer = await this.downloadImage(images[i]);
+          if (imgBuffer) {
+            await this.sock.sendMessage(jid, {
+              image: imgBuffer,
+            });
+          }
+        }
+        
+        // Send buttons as separate text message if any
+        if (buttons.length > 0) {
+          const buttonTexts = buttons.map(btn => {
+            if (btn.type === 'URL' && btn.url) {
+              return `${btn.text}\n${btn.url}`;
+            } else if (btn.type === 'PHONE_NUMBER' && btn.phone_number) {
+              return `${btn.text}\n${btn.phone_number}`;
+            }
+            return btn.text;
+          });
+          await this.sock.sendMessage(jid, { 
+            text: buttonTexts.join('\n\n') 
+          });
+        }
+        
+        return result;
+      }
+    }
+
+    // If no images, send text message with buttons
+    let fullText = [headerText, bodyText].filter(Boolean).join('\n\n');
+    
+    // Append buttons as clickable text
+    if (buttons.length > 0) {
+      const buttonTexts = buttons.map(btn => {
+        if (btn.type === 'URL' && btn.url) {
+          return `${btn.text}\n${btn.url}`;
+        } else if (btn.type === 'PHONE_NUMBER' && btn.phone_number) {
+          return `${btn.text}\n${btn.phone_number}`;
+        }
+        return btn.text;
+      });
+      fullText += '\n\n' + buttonTexts.join('\n\n');
+    }
+
+    // Simple text message (buttons are included as text with URLs/phone numbers)
+    const result = await this.sock.sendMessage(jid, { text: fullText });
+    return result;
+  }
+
+  private async downloadImage(url: string): Promise<Buffer | null> {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        logger.warn({ url, status: response.status }, 'Failed to download image');
+        return null;
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      return Buffer.from(arrayBuffer);
+    } catch (error) {
+      logger.error({ error, url }, 'Error downloading image');
+      return null;
+    }
+  }
+
+
+  private replaceVariables(text: string, variables: string[]): string {
+    let result = text;
+    variables.forEach((value, index) => {
+      const placeholder = `{{${index + 1}}}`;
+      result = result.replace(new RegExp(placeholder.replace(/[{}]/g, '\\$&'), 'g'), value);
+    });
+    return result;
   }
 
   async disconnect(): Promise<void> {
