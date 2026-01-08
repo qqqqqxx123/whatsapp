@@ -289,7 +289,7 @@ export class WhatsAppClient {
         return null;
       }
 
-      const data = await response.json();
+      const data = await response.json() as { templates?: any[] };
       const templates = data.templates || [];
       
       // Find exact match
@@ -388,6 +388,10 @@ export class WhatsAppClient {
           caption: caption || undefined,
         });
         
+        if (!result) {
+          throw new Error('Failed to send image message');
+        }
+        
         // Send remaining images if any
         for (let i = 1; i < images.length; i++) {
           const imgBuffer = await this.downloadImage(images[i]);
@@ -435,6 +439,9 @@ export class WhatsAppClient {
 
     // Simple text message (buttons are included as text with URLs/phone numbers)
     const result = await this.sock.sendMessage(jid, { text: fullText });
+    if (!result) {
+      throw new Error('Failed to send text message');
+    }
     return result;
   }
 
