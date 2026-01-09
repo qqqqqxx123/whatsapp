@@ -21,7 +21,21 @@ export interface SendMessageOptions {
   image?: {
     url: string;
   };
+  media?: {
+    type: string;
+    url: string;
+  };
+  medias?: Array<{
+    type: string;
+    url: string;
+  }>;
   caption?: string;
+  buttons?: Array<{
+    type: 'URL' | 'PHONE_NUMBER';
+    text: string;
+    url?: string;
+    phone_number?: string;
+  }>;
   template?: {
     name: string;
     language: string;
@@ -251,7 +265,7 @@ export class WhatsAppClient {
       throw new Error('WhatsApp client not initialized');
     }
 
-    const { to, text, image, caption, template } = options;
+    const { to, text, image, media, medias, caption, buttons, template } = options;
 
     // Normalize phone number from E.164 format (+852...) to Baileys JID format
     // Remove + and any non-digit characters
@@ -273,9 +287,20 @@ export class WhatsAppClient {
 
         // Build message with images and buttons
         result = await this.sendTemplateMessage(jid, templateData, template.variables || []);
-      } else if (image?.url) {
-        // Send image message
-        const imageBuffer = await this.downloadImage(image.url);
+      } else if (medias && medias.length > 0) {
+        // Send multiple images
+        result = await this.sendMultipleMedia(jid, medias, caption || text, buttons);
+        if (!result) {
+          throw new Error('Failed to send media messages');
+        }
+      } else if (media?.url || image?.url) {
+        // Send single image (support both 'media' and 'image' for backward compatibility)
+        const imageUrl = media?.url || image?.url;
+        if (!imageUrl) {
+          throw new Error('Image URL is required');
+        }
+
+        const imageBuffer = await this.downloadImage(imageUrl);
         if (!imageBuffer) {
           throw new Error('Failed to download image');
         }
@@ -288,14 +313,24 @@ export class WhatsAppClient {
         if (!result) {
           throw new Error('Failed to send image message');
         }
+
+        // Send buttons if provided
+        if (buttons && buttons.length > 0) {
+          await this.sendButtonsAsText(jid, buttons);
+        }
       } else if (text) {
         // Simple text message
         result = await this.sock.sendMessage(jid, { text });
         if (!result) {
           throw new Error('Failed to send text message');
         }
+
+        // Send buttons if provided
+        if (buttons && buttons.length > 0) {
+          await this.sendButtonsAsText(jid, buttons);
+        }
       } else {
-        throw new Error('Either text, image, or template is required');
+        throw new Error('Either text, image/media, medias, or template is required');
       }
 
       // Extract message ID from Baileys response
@@ -589,6 +624,84 @@ export class WhatsAppClient {
     }
   }
 
+
+  private async sendMultipleMedia(
+    jid: string,
+    medias: Array<{ type: string; url: string }>,
+    caption?: string,
+    buttons?: Array<{ type: 'URL' | 'PHONE_NUMBER'; text: string; url?: string; phone_number?: string }>
+  ): Promise<proto.WebMessageInfo> {
+    if (!this.sock) {
+      throw new Error('WhatsApp client not initialized');
+    }
+
+    let firstResult: proto.WebMessageInfo | undefined;
+
+    // Send all images
+    for (let i = 0; i < medias.length; i++) {
+      const media = medias[i];
+      
+      if (media.type === 'image') {
+        const imageBuffer = await this.downloadImage(media.url);
+        if (!imageBuffer) {
+          logger.warn({ url: media.url, index: i }, 'Failed to download image, skipping');
+          continue;
+        }
+
+        // Use caption only for the first image
+        const messageOptions: any = {
+          image: imageBuffer,
+        };
+
+        if (i === 0 && caption) {
+          messageOptions.caption = caption;
+        }
+
+        const result = await this.sock.sendMessage(jid, messageOptions);
+        
+        if (i === 0) {
+          firstResult = result;
+        }
+      } else {
+        logger.warn({ type: media.type, index: i }, 'Unsupported media type, skipping');
+      }
+    }
+
+    // Send buttons as separate text message if provided
+    if (buttons && buttons.length > 0) {
+      await this.sendButtonsAsText(jid, buttons);
+    }
+
+    if (!firstResult) {
+      throw new Error('Failed to send any media');
+    }
+
+    return firstResult;
+  }
+
+  private async sendButtonsAsText(
+    jid: string,
+    buttons: Array<{ type: 'URL' | 'PHONE_NUMBER'; text: string; url?: string; phone_number?: string }>
+  ): Promise<void> {
+    if (!this.sock || buttons.length === 0) return;
+
+    try {
+      const buttonTexts = buttons.map(btn => {
+        if (btn.type === 'URL' && btn.url) {
+          return `${btn.text}\n${btn.url}`;
+        } else if (btn.type === 'PHONE_NUMBER' && btn.phone_number) {
+          return `${btn.text}\n${btn.phone_number}`;
+        }
+        return btn.text;
+      });
+
+      await this.sock.sendMessage(jid, {
+        text: buttonTexts.join('\n\n'),
+      });
+    } catch (error) {
+      logger.error({ error }, 'Error sending buttons as text');
+    }
+  }
 
   private replaceVariables(text: string, variables: string[]): string {
     let result = text;
