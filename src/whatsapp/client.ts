@@ -642,8 +642,32 @@ export class WhatsAppClient {
       throw new Error('No image media found');
     }
 
-    // Step 1: Send all images first (without captions)
-    for (let i = 0; i < imageMedias.length; i++) {
+    // Build caption with text and buttons (for the last image)
+    let fullCaption = '';
+    if (caption) {
+      fullCaption = caption;
+    }
+    
+    // Add buttons to caption
+    if (buttons && buttons.length > 0) {
+      const buttonTexts = buttons.map(btn => {
+        if (btn.type === 'URL' && btn.url) {
+          return `${btn.text}\n${btn.url}`;
+        } else if (btn.type === 'PHONE_NUMBER' && btn.phone_number) {
+          return `${btn.text}\n${btn.phone_number}`;
+        }
+        return btn.text;
+      });
+      
+      if (fullCaption) {
+        fullCaption += '\n\n' + buttonTexts.join('\n\n');
+      } else {
+        fullCaption = buttonTexts.join('\n\n');
+      }
+    }
+
+    // Step 1: Send all images except the last one (without captions)
+    for (let i = 0; i < imageMedias.length - 1; i++) {
       const media = imageMedias[i];
       const imageBuffer = await this.downloadImage(media.url);
       if (!imageBuffer) {
@@ -660,55 +684,25 @@ export class WhatsAppClient {
       }
     }
 
-    // Step 2: Send the last image again with caption (text + buttons)
-    if (imageMedias.length > 0) {
-      const lastMedia = imageMedias[imageMedias.length - 1];
-      const lastImageBuffer = await this.downloadImage(lastMedia.url);
-      
-      if (lastImageBuffer) {
-        // Build caption with text and buttons
-        let fullCaption = '';
-        
-        if (caption) {
-          fullCaption = caption;
-        }
-        
-        // Add buttons to caption
-        if (buttons && buttons.length > 0) {
-          const buttonTexts = buttons.map(btn => {
-            if (btn.type === 'URL' && btn.url) {
-              return `${btn.text}\n${btn.url}`;
-            } else if (btn.type === 'PHONE_NUMBER' && btn.phone_number) {
-              return `${btn.text}\n${btn.phone_number}`;
-            }
-            return btn.text;
-          });
-          
-          if (fullCaption) {
-            fullCaption += '\n\n' + buttonTexts.join('\n\n');
-          } else {
-            fullCaption = buttonTexts.join('\n\n');
-          }
-        }
-
-        // Send last image with caption
-        const result = await this.sock.sendMessage(jid, {
-          image: lastImageBuffer,
-          caption: fullCaption || undefined,
-        });
-
-        // Return the result of the last image with caption
-        if (result) {
-          return result;
-        }
-      }
+    // Step 2: Send the last image with caption (text + buttons)
+    const lastMedia = imageMedias[imageMedias.length - 1];
+    const lastImageBuffer = await this.downloadImage(lastMedia.url);
+    
+    if (!lastImageBuffer) {
+      throw new Error('Failed to download last image');
     }
 
-    if (!firstResult) {
-      throw new Error('Failed to send any media');
+    const result = await this.sock.sendMessage(jid, {
+      image: lastImageBuffer,
+      caption: fullCaption || undefined,
+    });
+
+    if (!result) {
+      throw new Error('Failed to send last image with caption');
     }
 
-    return firstResult;
+    // Return the result of the last image with caption
+    return result;
   }
 
   private async sendButtonsAsText(
