@@ -636,40 +636,72 @@ export class WhatsAppClient {
     }
 
     let firstResult: proto.WebMessageInfo | undefined;
+    const imageMedias = medias.filter(m => m.type === 'image');
 
-    // Send all images
-    for (let i = 0; i < medias.length; i++) {
-      const media = medias[i];
+    if (imageMedias.length === 0) {
+      throw new Error('No image media found');
+    }
+
+    // Step 1: Send all images first (without captions)
+    for (let i = 0; i < imageMedias.length; i++) {
+      const media = imageMedias[i];
+      const imageBuffer = await this.downloadImage(media.url);
+      if (!imageBuffer) {
+        logger.warn({ url: media.url, index: i }, 'Failed to download image, skipping');
+        continue;
+      }
+
+      const result = await this.sock.sendMessage(jid, {
+        image: imageBuffer,
+      });
       
-      if (media.type === 'image') {
-        const imageBuffer = await this.downloadImage(media.url);
-        if (!imageBuffer) {
-          logger.warn({ url: media.url, index: i }, 'Failed to download image, skipping');
-          continue;
-        }
-
-        // Use caption only for the first image
-        const messageOptions: any = {
-          image: imageBuffer,
-        };
-
-        if (i === 0 && caption) {
-          messageOptions.caption = caption;
-        }
-
-        const result = await this.sock.sendMessage(jid, messageOptions);
-        
-        if (i === 0) {
-          firstResult = result;
-        }
-      } else {
-        logger.warn({ type: media.type, index: i }, 'Unsupported media type, skipping');
+      if (i === 0) {
+        firstResult = result;
       }
     }
 
-    // Send buttons as separate text message if provided
-    if (buttons && buttons.length > 0) {
-      await this.sendButtonsAsText(jid, buttons);
+    // Step 2: Send the last image again with caption (text + buttons)
+    if (imageMedias.length > 0) {
+      const lastMedia = imageMedias[imageMedias.length - 1];
+      const lastImageBuffer = await this.downloadImage(lastMedia.url);
+      
+      if (lastImageBuffer) {
+        // Build caption with text and buttons
+        let fullCaption = '';
+        
+        if (caption) {
+          fullCaption = caption;
+        }
+        
+        // Add buttons to caption
+        if (buttons && buttons.length > 0) {
+          const buttonTexts = buttons.map(btn => {
+            if (btn.type === 'URL' && btn.url) {
+              return `${btn.text}\n${btn.url}`;
+            } else if (btn.type === 'PHONE_NUMBER' && btn.phone_number) {
+              return `${btn.text}\n${btn.phone_number}`;
+            }
+            return btn.text;
+          });
+          
+          if (fullCaption) {
+            fullCaption += '\n\n' + buttonTexts.join('\n\n');
+          } else {
+            fullCaption = buttonTexts.join('\n\n');
+          }
+        }
+
+        // Send last image with caption
+        const result = await this.sock.sendMessage(jid, {
+          image: lastImageBuffer,
+          caption: fullCaption || undefined,
+        });
+
+        // Return the result of the last image with caption
+        if (result) {
+          return result;
+        }
+      }
     }
 
     if (!firstResult) {
