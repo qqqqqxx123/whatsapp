@@ -171,38 +171,10 @@ export class OutboundHandler {
         }
       }
 
-      // First, save message to CRM database via API
-      try {
-        const crmSaveResponse = await fetch(`${this.CRM_URL}/api/whatsapp/outbound`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(this.CRM_API_KEY && { 'X-API-Key': this.CRM_API_KEY }),
-          },
-          body: JSON.stringify({
-            from: phoneE164, // This is actually "to" since it's outbound
-            body: messageText,
-            message: messageText,
-            message_id: messageId,
-            timestamp,
-            type: 'text',
-            phone_e164: phoneE164,
-            direction: 'out',
-          }),
-          signal: AbortSignal.timeout(10000), // 10 second timeout
-        });
-
-        if (!crmSaveResponse.ok) {
-          logger.warn(
-            { messageId, status: crmSaveResponse.status },
-            'Failed to save outbound message to CRM database'
-          );
-        } else {
-          logger.info({ messageId }, 'Outbound message saved to CRM database');
-        }
-      } catch (saveError) {
-        logger.error({ error: saveError, messageId }, 'Error saving outbound message to CRM');
-      }
+      // Skip saving message to CRM database - CRM already has the "sent" record
+      // This prevents duplicates and reduces resource usage
+      // The message status will remain "sent" in CRM, not updated to "delivered"
+      logger.debug({ messageId, to: phoneE164 }, 'Skipping CRM database update (delivery updates disabled)');
 
       // Forward to outbound webhook if configured
       if (this.webhookUrl) {
