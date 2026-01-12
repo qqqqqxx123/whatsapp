@@ -219,25 +219,12 @@ export class InboundHandler {
           });
 
           if (!response.ok) {
-            const errorText = await response.text().catch(() => 'Unable to read response body');
             logger.error(
-              { 
-                messageId, 
-                status: response.status, 
-                statusText: response.statusText,
-                errorBody: errorText.substring(0, 500),
-                webhookUrl: this.webhookUrl
-              },
+              { messageId, status: response.status, statusText: response.statusText },
               'Failed to forward message to CRM'
             );
           } else {
-            const responseText = await response.text().catch(() => '');
-            logger.info({ 
-              messageId, 
-              status: response.status,
-              responseBody: responseText.substring(0, 200),
-              webhookUrl: this.webhookUrl
-            }, 'Message forwarded to CRM successfully');
+            logger.info({ messageId }, 'Message forwarded to CRM successfully');
           }
 
           await auditLogger.log('inbound', {
