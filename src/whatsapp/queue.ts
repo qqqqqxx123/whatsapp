@@ -14,10 +14,14 @@ export class MessageQueue {
   private processing: boolean = false;
   private readonly maxRetries: number;
   private readonly retryDelayMs: number;
+  private readonly minDelayBetweenMessages: number;
+  private lastMessageSentAt: Date | null = null;
 
   constructor() {
     this.maxRetries = parseInt(process.env.MAX_RETRIES || '3', 10);
     this.retryDelayMs = parseInt(process.env.RETRY_DELAY_MS || '1000', 10);
+    // Minimum delay between messages to prevent spam detection (default: 2 seconds = 30 messages/min max)
+    this.minDelayBetweenMessages = parseInt(process.env.MIN_DELAY_BETWEEN_MESSAGES_MS || '2000', 10);
   }
 
   async add<T>(data: T, execute: (data: T) => Promise<string>): Promise<string> {
@@ -49,8 +53,19 @@ export class MessageQueue {
       const item = this.queue.shift();
       if (!item) break;
 
+      // Calculate delay needed to respect rate limits
+      if (this.lastMessageSentAt) {
+        const timeSinceLastMessage = Date.now() - this.lastMessageSentAt.getTime();
+        if (timeSinceLastMessage < this.minDelayBetweenMessages) {
+          const delayNeeded = this.minDelayBetweenMessages - timeSinceLastMessage;
+          logger.debug({ itemId: item.id, delayMs: delayNeeded }, 'Delaying message to respect rate limits');
+          await this.sleep(delayNeeded);
+        }
+      }
+
       try {
         const result = await this.executeWithRetry(item);
+        this.lastMessageSentAt = new Date();
         item.resolve(result);
       } catch (error) {
         logger.error({ error, itemId: item.id, retries: item.retries }, 'Message failed after retries');
